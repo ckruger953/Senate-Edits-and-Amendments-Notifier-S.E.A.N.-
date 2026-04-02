@@ -98,7 +98,7 @@
     <div class="space-y-3">
         {% for bill in bills %}
         <div class="bg-white rounded-xl shadow-sm border overflow-hidden"
-             x-show="matches({bn: '{{ bill.bill_number }}', title: {{ bill.title|tojson }}, latestDesc: {{ (bill.senate_actions[0].description if bill.senate_actions else '')|tojson }}, hc: '{{ bill.house_committee or '' }}', sc: '{{ bill.senate_committee or '' }}', amendText: {{ (bill.amendment_text or '')|tojson }}})">
+             x-show="matches({bn: '{{ bill.bill_number }}', title: {{ bill.title|tojson }}, latestDesc: {{ (bill.senate_actions[0].description if bill.senate_actions else '')|tojson }}, hc: '{{ bill.house_committee or '' }}', sc: '{{ bill.senate_committee or '' }}', amendText: {{ (bill.amendment_text or '')[:500]|tojson }}})">
             <!-- Header -->
             <div class="p-5 cursor-pointer hover:bg-slate-50 transition" @click="toggle('{{ bill.bill_number }}')">
                 <div class="flex items-center justify-between">
@@ -151,7 +151,7 @@
                 <div class="border-t px-5 py-4 bg-slate-50/50 space-y-4">
 
                     <!-- Amendment Text -->
-                    {% if bill.amendment_text %}
+                    {% if bill.amendment_html %}
                     <div>
                         <div class="text-xs font-bold text-slate-400 uppercase tracking-wider mb-2">
                             Amendment Text
@@ -159,8 +159,8 @@
                             <span class="text-amber-600 normal-case">({{ bill.amendment_version }})</span>
                             {% endif %}
                         </div>
-                        <div class="bg-white rounded-lg border p-4 text-sm text-slate-700 leading-relaxed max-h-64 overflow-y-auto font-mono text-xs">
-                            {{ bill.amendment_text }}
+                        <div class="bg-white rounded-lg border p-4 text-sm text-slate-700 leading-relaxed max-h-96 overflow-y-auto prose prose-sm max-w-none">
+                            {{ bill.amendment_html|safe }}
                         </div>
                     </div>
                     {% endif %}
