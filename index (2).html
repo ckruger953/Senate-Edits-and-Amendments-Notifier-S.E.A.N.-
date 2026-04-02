@@ -1,0 +1,713 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>S.E.A.N. — Senate Edits & Amendments Notifier</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-database-compat.js"></script>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #0f1118; font-family: 'IBM Plex Sans', sans-serif; color: #e2e8f0; }
+    @keyframes slideIn { from { opacity: 0; transform: translateY(-8px); } to { opacity: 1; transform: translateY(0); } }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.6; } }
+    @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-track { background: #1a1a2e; }
+    ::-webkit-scrollbar-thumb { background: #4a5568; border-radius: 3px; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script>
+    // ── Firebase Init ─────────────────────────────────────────
+    const firebaseConfig = {
+      apiKey: "AIzaSyCyP_LKTH0rtAC0N0Qi1EVnTsexe2OotqE",
+      authDomain: "sean-41a57.firebaseapp.com",
+      databaseURL: "https://sean-41a57-default-rtdb.firebaseio.com",
+      projectId: "sean-41a57",
+      storageBucket: "sean-41a57.firebasestorage.app",
+      messagingSenderId: "823202231648",
+      appId: "1:823202231648:web:1d8caeb3fab1229cb99a05",
+      measurementId: "G-V1W56T90V3"
+    };
+    firebase.initializeApp(firebaseConfig);
+    const db = firebase.database();
+  </script>
+
+  <script type="text/babel">
+    const { useState, useEffect, useRef } = React;
+
+    // ── Firebase Storage Layer ────────────────────────────────
+    // This replaces localStorage — all three users share the same data
+    const fireStore = {
+      async get(key) {
+        try {
+          const snapshot = await db.ref(`sean/${key}`).once("value");
+          const val = snapshot.val();
+          return val ? { value: val } : null;
+        } catch (e) { console.error("Firebase get error:", e); return null; }
+      },
+      async set(key, value) {
+        try {
+          await db.ref(`sean/${key}`).set(value);
+          return { key, value };
+        } catch (e) { console.error("Firebase set error:", e); return null; }
+      },
+      // Listen for real-time changes
+      onValue(key, callback) {
+        const ref = db.ref(`sean/${key}`);
+        ref.on("value", (snapshot) => {
+          const val = snapshot.val();
+          callback(val);
+        });
+        return () => ref.off("value");
+      }
+    };
+
+    // ── Parsing Helpers ──────────────────────────────────────
+
+    function parseDocketText(raw) {
+      const lines = raw.split("\n").filter((l) => l.trim());
+      const entries = [];
+      for (const line of lines) {
+        const parts = line.split("|");
+        if (parts.length < 6) continue;
+        const sessionYear = parts[0]?.trim();
+        const lsr = parts[1]?.trim();
+        const dateStr = parts[2]?.trim();
+        const billNo = parts[3]?.trim();
+        const body = parts[4]?.trim();
+        const description = parts[5]?.trim();
+        if (!sessionYear || !billNo) continue;
+        entries.push({ sessionYear, lsr, dateStr, billNo, body, description });
+      }
+      return entries;
+    }
+
+    function parseLSRText(raw) {
+      const lines = raw.split("\n").filter((l) => l.trim());
+      const lookup = {};
+      for (const line of lines) {
+        const parts = line.split("|");
+        if (parts.length < 5) continue;
+        const sessionYear = parts[0]?.trim();
+        const lsr = parts[1]?.trim();
+        const title = parts[2]?.trim();
+        let billNo = "";
+        for (let i = 3; i < Math.min(parts.length, 15); i++) {
+          const p = parts[i]?.trim();
+          if (p && /^(HB|SB|HR|SR|HCR|SCR|CACR)\s*\d+/i.test(p)) {
+            billNo = p.replace(/\s+/g, "").toUpperCase();
+            break;
+          }
+        }
+        const key = `${sessionYear}-${lsr}`;
+        lookup[key] = { sessionYear, lsr, title, billNo };
+      }
+      return lookup;
+    }
+
+    function extractAmendmentNumbers(description) {
+      const matches = description.match(/#(\d{4}-\d{4,5}[a-z]?)/g);
+      if (!matches) return [];
+      return matches.map((m) => m.replace("#", ""));
+    }
+
+    function isAmendmentAction(desc) {
+      if (!desc) return false;
+      const d = desc.toLowerCase();
+      return d.includes("amendment") || d.includes("ought to pass with") ||
+        d.includes("otp-a") || d.includes("otp/a") ||
+        d.includes("concur") || d.includes("nonconcur");
+    }
+
+    function formatDate(dateStr) {
+      if (!dateStr) return "";
+      const match = dateStr.match(/(\d{1,2}\/\d{1,2}\/\d{4})/);
+      return match ? match[1] : dateStr.split(" ")[0] || dateStr;
+    }
+
+    function timeAgo(dateStr) {
+      if (!dateStr) return "";
+      const now = new Date();
+      const then = new Date(dateStr);
+      const diffMs = now - then;
+      const diffMins = Math.floor(diffMs / 60000);
+      if (diffMins < 60) return `${diffMins}m ago`;
+      const diffHrs = Math.floor(diffMins / 60);
+      if (diffHrs < 24) return `${diffHrs}h ago`;
+      const diffDays = Math.floor(diffHrs / 24);
+      return `${diffDays}d ago`;
+    }
+
+    // ── AI Summary Component ─────────────────────────────────
+    function AISummary({ bill }) {
+      const [summary, setSummary] = useState(null);
+      const [loading, setLoading] = useState(false);
+
+      const fetchSummary = async () => {
+        setLoading(true);
+        try {
+          const billNo = bill.billNumber || "Unknown HB";
+          const actions = (bill.senateActions || [])
+            .map((a) => `${a.date}: ${a.description}`)
+            .join("\n");
+
+          const prompt = `You are a New Hampshire legislative analyst working for the Republican House Majority Office. A House Bill has been amended by the Senate. Based on the following docket actions, provide a concise 2-3 sentence summary of what the Senate appears to have done to this bill. Focus on: what kind of amendment action was taken (committee amendment vs floor amendment), who sponsored it if visible, and what the current procedural status is (e.g., does the House need to concur?). Be direct and practical — this is for staffers tracking bill flow.
+
+Bill: ${billNo}
+${bill.title ? `Title: ${bill.title}` : ""}
+Amendment Numbers: ${(bill.amendmentNumbers || []).join(", ") || "See actions"}
+
+Senate Docket Actions:
+${actions}
+
+Respond with ONLY the summary, no preamble.`;
+
+          const response = await fetch("https://api.anthropic.com/v1/messages", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              model: "claude-sonnet-4-20250514",
+              max_tokens: 1000,
+              messages: [{ role: "user", content: prompt }],
+            }),
+          });
+
+          const data = await response.json();
+          const text = data.content
+            ?.filter((item) => item.type === "text")
+            .map((item) => item.text)
+            .join("\n");
+
+          setSummary(text || "No summary available.");
+        } catch (err) {
+          setSummary("Summary unavailable — requires API access.");
+        }
+        setLoading(false);
+      };
+
+      if (summary) {
+        return (
+          <div style={styles.summaryBox}>
+            <div style={styles.summaryLabel}>
+              <span style={styles.aiIcon}>✦</span> AI ANALYSIS
+            </div>
+            <p style={styles.summaryText}>{summary}</p>
+          </div>
+        );
+      }
+
+      return (
+        <button onClick={fetchSummary} disabled={loading}
+          style={{ ...styles.summarizeBtn, opacity: loading ? 0.6 : 1 }}>
+          {loading
+            ? <span style={{ display: "inline-block", animation: "spin 1s linear infinite", fontSize: "14px" }}>⟳</span>
+            : <><span style={styles.aiIcon}>✦</span> Analyze Amendment</>}
+        </button>
+      );
+    }
+
+    // ── Bill Card ────────────────────────────────────────────
+    function BillCard({ bill, isNew }) {
+      const [expanded, setExpanded] = useState(false);
+      const latestAction = bill.senateActions?.[0];
+
+      return (
+        <div style={{
+          ...styles.card,
+          borderLeft: isNew ? "4px solid #c0392b" : "4px solid #2c3e50",
+          animation: isNew ? "slideIn 0.4s ease-out" : "none"
+        }}>
+          <div style={styles.cardHeader} onClick={() => setExpanded(!expanded)}>
+            <div style={styles.cardHeaderLeft}>
+              {isNew && <span style={styles.newBadge}>NEW</span>}
+              <span style={styles.billNumber}>{bill.billNumber}</span>
+              {latestAction && <span style={styles.dateChip}>{latestAction.date}</span>}
+            </div>
+            <span style={styles.expandIcon}>{expanded ? "▾" : "▸"}</span>
+          </div>
+
+          {bill.title && <p style={styles.introDesc}>{bill.title}</p>}
+
+          {latestAction && (
+            <div style={styles.latestAction}>
+              <span style={styles.senateTag}>SENATE</span>
+              <span style={styles.actionText}>{latestAction.description}</span>
+            </div>
+          )}
+
+          {(bill.amendmentNumbers || []).length > 0 && (
+            <div style={styles.amendRow}>
+              {bill.amendmentNumbers.map((num) => (
+                <span key={num} style={styles.amendChip}>#{num}</span>
+              ))}
+            </div>
+          )}
+
+          <AISummary bill={bill} />
+
+          {expanded && (
+            <div style={styles.expandedSection}>
+              <div style={styles.expandedTitle}>ALL SENATE ACTIONS</div>
+              {(bill.senateActions || []).map((action, i) => (
+                <div key={i} style={styles.actionRow}>
+                  <span style={styles.actionDate}>{action.date}</span>
+                  <span style={styles.actionDesc}>{action.description}</span>
+                </div>
+              ))}
+              <div style={{ marginTop: "10px" }}>
+                <a href={`https://gc.nh.gov/bill_Status/billinfo.aspx?id=${bill.lsr}&inflect=2`}
+                  target="_blank" rel="noopener noreferrer" style={styles.gcLink}>
+                  View on gc.nh.gov →
+                </a>
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    // ── Data Input Modal ─────────────────────────────────────
+    function DataInputModal({ onClose, onProcess }) {
+      const [step, setStep] = useState(1);
+      const [docketText, setDocketText] = useState("");
+      const [lsrText, setLsrText] = useState("");
+      const [processing, setProcessing] = useState(false);
+
+      const handleProcess = () => {
+        setProcessing(true);
+        setTimeout(() => {
+          onProcess(docketText, lsrText);
+          setProcessing(false);
+        }, 100);
+      };
+
+      return (
+        <div style={styles.modalOverlay}>
+          <div style={styles.modal}>
+            <div style={styles.modalHeader}>
+              <h2 style={styles.modalTitle}>
+                <span style={{ color: "#c0392b" }}>⇧</span> REFRESH DATA
+              </h2>
+              <button onClick={onClose} style={styles.modalClose}>✕</button>
+            </div>
+
+            {step === 1 && (
+              <div style={styles.modalBody}>
+                <div style={styles.stepIndicator}>
+                  <span style={styles.stepActive}>① DOCKET</span>
+                  <span style={styles.stepInactive}>② LSR TABLE</span>
+                </div>
+                <div style={styles.instructions}>
+                  <p style={styles.instrText}>
+                    <strong>1.</strong> Open{" "}
+                    <a href="https://gc.nh.gov/dynamicdatadump" target="_blank"
+                      rel="noopener noreferrer" style={styles.instrLink}>
+                      gc.nh.gov/dynamicdatadump
+                    </a>
+                  </p>
+                  <p style={styles.instrText}><strong>2.</strong> Click <strong>"Docket"</strong></p>
+                  <p style={styles.instrText}><strong>3.</strong> Press <code style={styles.code}>Ctrl+A</code> then <code style={styles.code}>Ctrl+C</code></p>
+                  <p style={styles.instrText}><strong>4.</strong> Paste below:</p>
+                </div>
+                <textarea style={styles.pasteBox}
+                  placeholder="Paste the Docket data here..."
+                  value={docketText}
+                  onChange={(e) => setDocketText(e.target.value)}
+                  spellCheck={false} />
+                <div style={styles.pasteCount}>
+                  {docketText
+                    ? `${docketText.split("\n").filter((l) => l.trim()).length.toLocaleString()} lines detected`
+                    : "Waiting for paste..."}
+                </div>
+                <button onClick={() => setStep(2)}
+                  disabled={!docketText.trim()}
+                  style={{ ...styles.nextBtn, opacity: docketText.trim() ? 1 : 0.4 }}>
+                  Next: LSR Table →
+                </button>
+              </div>
+            )}
+
+            {step === 2 && (
+              <div style={styles.modalBody}>
+                <div style={styles.stepIndicator}>
+                  <span style={styles.stepDone}>✓ DOCKET</span>
+                  <span style={styles.stepActive}>② LSR TABLE</span>
+                </div>
+                <div style={styles.instructions}>
+                  <p style={styles.instrText}>
+                    <strong>1.</strong> Go back to the{" "}
+                    <a href="https://gc.nh.gov/dynamicdatadump" target="_blank"
+                      rel="noopener noreferrer" style={styles.instrLink}>
+                      Dynamic Data Files
+                    </a>{" "}page
+                  </p>
+                  <p style={styles.instrText}><strong>2.</strong> Click <strong>"LSR Table"</strong></p>
+                  <p style={styles.instrText}><strong>3.</strong> Press <code style={styles.code}>Ctrl+A</code> then <code style={styles.code}>Ctrl+C</code></p>
+                  <p style={styles.instrText}><strong>4.</strong> Paste below:</p>
+                </div>
+                <textarea style={styles.pasteBox}
+                  placeholder="Paste the LSR Table data here..."
+                  value={lsrText}
+                  onChange={(e) => setLsrText(e.target.value)}
+                  spellCheck={false} />
+                <div style={styles.pasteCount}>
+                  {lsrText
+                    ? `${lsrText.split("\n").filter((l) => l.trim()).length.toLocaleString()} lines detected`
+                    : "Waiting for paste..."}
+                </div>
+                <div style={styles.btnRow}>
+                  <button onClick={() => setStep(1)} style={styles.backBtn}>← Back</button>
+                  <button onClick={handleProcess}
+                    disabled={!lsrText.trim() || processing}
+                    style={{ ...styles.processBtn, opacity: lsrText.trim() && !processing ? 1 : 0.4 }}>
+                    {processing ? "Processing..." : "⚡ Process & Update S.E.A.N."}
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      );
+    }
+
+    // ── Sync Status Indicator ────────────────────────────────
+    function SyncStatus({ connected }) {
+      return (
+        <div style={{
+          display: "flex", alignItems: "center", gap: "6px",
+          fontFamily: "'IBM Plex Mono', monospace", fontSize: "10px",
+          color: connected ? "#27ae60" : "#e74c3c",
+          letterSpacing: "0.5px"
+        }}>
+          <span style={{
+            width: "6px", height: "6px", borderRadius: "50%",
+            background: connected ? "#27ae60" : "#e74c3c",
+            display: "inline-block",
+            animation: connected ? "pulse 3s ease-in-out infinite" : "none"
+          }} />
+          {connected ? "LIVE SYNC" : "OFFLINE"}
+        </div>
+      );
+    }
+
+    // ── Main App ─────────────────────────────────────────────
+    function SEAN() {
+      const [bills, setBills] = useState([]);
+      const [newBillIds, setNewBillIds] = useState(new Set());
+      const [lastUpdated, setLastUpdated] = useState(null);
+      const [lastUpdatedBy, setLastUpdatedBy] = useState(null);
+      const [totalCount, setTotalCount] = useState(0);
+      const [filterText, setFilterText] = useState("");
+      const [loading, setLoading] = useState(true);
+      const [showInput, setShowInput] = useState(false);
+      const [connected, setConnected] = useState(false);
+      const seenRef = useRef(new Set());
+      const initialLoadRef = useRef(true);
+
+      // Listen for real-time updates from Firebase
+      useEffect(() => {
+        const unsubscribe = fireStore.onValue("billData", (val) => {
+          setConnected(true);
+          if (!val) {
+            setLoading(false);
+            return;
+          }
+
+          try {
+            const parsed = typeof val === "string" ? JSON.parse(val) : val;
+            const billsList = parsed.bills || [];
+            setBills(billsList);
+            setLastUpdated(parsed.updatedAt || null);
+            setLastUpdatedBy(parsed.updatedBy || null);
+            setTotalCount(billsList.length);
+
+            // On first load, mark everything as seen
+            // On subsequent updates, detect new bills
+            if (initialLoadRef.current) {
+              for (const bill of billsList) {
+                const key = `${bill.billNumber}__${(bill.amendmentNumbers || []).join(",")}`;
+                seenRef.current.add(key);
+              }
+              initialLoadRef.current = false;
+            } else {
+              const newIds = new Set();
+              for (const bill of billsList) {
+                const key = `${bill.billNumber}__${(bill.amendmentNumbers || []).join(",")}`;
+                if (!seenRef.current.has(key)) {
+                  newIds.add(bill.billNumber);
+                  seenRef.current.add(key);
+                }
+              }
+              if (newIds.size > 0) setNewBillIds(newIds);
+            }
+          } catch (e) {
+            console.error("Parse error:", e);
+          }
+          setLoading(false);
+        });
+
+        // Connection state monitoring
+        const connRef = db.ref(".info/connected");
+        connRef.on("value", (snap) => {
+          setConnected(!!snap.val());
+        });
+
+        return () => {
+          unsubscribe();
+          connRef.off();
+        };
+      }, []);
+
+      const processData = async (docketRaw, lsrRaw) => {
+        const docketEntries = parseDocketText(docketRaw);
+        const lsrLookup = parseLSRText(lsrRaw);
+
+        const hbSenateAmendments = docketEntries.filter((e) => {
+          const isHB = e.billNo && e.billNo.toUpperCase().startsWith("HB");
+          const isSenate = e.body === "S";
+          const isAmend = isAmendmentAction(e.description);
+          return isHB && isSenate && isAmend;
+        });
+
+        const billMap = {};
+        for (const entry of hbSenateAmendments) {
+          const bn = entry.billNo.toUpperCase();
+          if (!billMap[bn]) {
+            const lsrKey = `${entry.sessionYear}-${entry.lsr}`;
+            const lsrInfo = lsrLookup[lsrKey];
+            billMap[bn] = {
+              billNumber: bn,
+              lsr: entry.lsr,
+              sessionYear: entry.sessionYear,
+              title: lsrInfo?.title || "",
+              senateActions: [],
+              amendmentNumbers: [],
+            };
+          }
+          const date = formatDate(entry.dateStr);
+          billMap[bn].senateActions.push({ date, description: entry.description });
+          const amendNums = extractAmendmentNumbers(entry.description);
+          for (const num of amendNums) {
+            if (!billMap[bn].amendmentNumbers.includes(num))
+              billMap[bn].amendmentNumbers.push(num);
+          }
+        }
+
+        const billsList = Object.values(billMap).sort((a, b) => {
+          const dateA = a.senateActions[0]?.date || "";
+          const dateB = b.senateActions[0]?.date || "";
+          const pA = dateA.split("/");
+          const pB = dateB.split("/");
+          const dA = pA.length === 3 ? new Date(pA[2], pA[0] - 1, pA[1]) : new Date(0);
+          const dB = pB.length === 3 ? new Date(pB[2], pB[0] - 1, pB[1]) : new Date(0);
+          return dB - dA;
+        });
+
+        // Detect new bills
+        const newIds = new Set();
+        for (const bill of billsList) {
+          const key = `${bill.billNumber}__${bill.amendmentNumbers.join(",")}`;
+          if (!seenRef.current.has(key)) {
+            newIds.add(bill.billNumber);
+            seenRef.current.add(key);
+          }
+        }
+
+        const now = new Date().toISOString();
+        const payload = {
+          bills: billsList,
+          updatedAt: now,
+          updatedBy: "Staff"
+        };
+
+        // Save to Firebase — this triggers real-time sync to all users
+        await fireStore.set("billData", JSON.stringify(payload));
+
+        setNewBillIds(newIds);
+        setShowInput(false);
+      };
+
+      const handleClearNew = () => setNewBillIds(new Set());
+
+      const filteredBills = bills.filter((b) => {
+        if (!filterText) return true;
+        const q = filterText.toLowerCase();
+        return (
+          (b.billNumber || "").toLowerCase().includes(q) ||
+          (b.title || "").toLowerCase().includes(q) ||
+          (b.senateActions || []).some((a) => (a.description || "").toLowerCase().includes(q))
+        );
+      });
+
+      const newCount = filteredBills.filter((b) => newBillIds.has(b.billNumber)).length;
+
+      return (
+        <div style={styles.container}>
+          <div style={styles.bgPattern} />
+
+          <header style={styles.header}>
+            <div style={styles.titleRow}>
+              <div>
+                <div style={{ display: "flex", alignItems: "center", gap: "16px" }}>
+                  <h1 style={styles.title}>
+                    <span style={styles.accent}>S</span>.<span style={styles.accent}>E</span>.<span style={styles.accent}>A</span>.<span style={styles.accent}>N</span>.
+                  </h1>
+                  <SyncStatus connected={connected} />
+                </div>
+                <p style={styles.titleFull}>Senate Edits & Amendments Notifier</p>
+                <p style={styles.subtitle}>NH General Court — Republican House Majority Office</p>
+              </div>
+              <button onClick={() => setShowInput(true)} style={styles.refreshBtn}>⟳ Refresh Data</button>
+            </div>
+            <div style={styles.statsRow}>
+              <div style={styles.statBox}>
+                <div style={styles.statNumber}>{totalCount}</div>
+                <div style={styles.statLabel}>HBs w/ Senate Amendments</div>
+              </div>
+              <div style={{ ...styles.statBox, background: newCount > 0 ? "rgba(192,57,43,0.15)" : undefined }}>
+                <div style={{ ...styles.statNumber, color: newCount > 0 ? "#c0392b" : undefined }}>{newCount}</div>
+                <div style={styles.statLabel}>New Since Last Check</div>
+              </div>
+              {lastUpdated && (
+                <div style={styles.statBox}>
+                  <div style={styles.statMeta}>
+                    Updated: {timeAgo(lastUpdated)}
+                    {lastUpdatedBy && <span> by {lastUpdatedBy}</span>}
+                  </div>
+                </div>
+              )}
+            </div>
+          </header>
+
+          {bills.length > 0 && (
+            <div style={styles.toolbar}>
+              <input type="text"
+                placeholder="Filter by bill number, keyword, amendment..."
+                value={filterText}
+                onChange={(e) => setFilterText(e.target.value)}
+                style={styles.filterInput} />
+              {newCount > 0 && (
+                <button onClick={handleClearNew} style={styles.clearBtn}>Mark all seen</button>
+              )}
+            </div>
+          )}
+
+          <div style={styles.cardGrid}>
+            {loading && bills.length === 0 && (
+              <div style={styles.emptyState}>Connecting to Firebase...</div>
+            )}
+            {!loading && bills.length === 0 && (
+              <div style={styles.emptyState}>
+                <div style={{ fontSize: "48px", marginBottom: "16px" }}>📋</div>
+                <div style={styles.emptyTitle}>No data yet</div>
+                <div style={styles.emptyDesc}>
+                  Click <strong>⟳ Refresh Data</strong> to paste data from gc.nh.gov
+                </div>
+                <button onClick={() => setShowInput(true)} style={styles.emptyBtn}>
+                  ⟳ Load Data Now
+                </button>
+              </div>
+            )}
+            {filteredBills.map((bill) => (
+              <BillCard key={bill.billNumber} bill={bill} isNew={newBillIds.has(bill.billNumber)} />
+            ))}
+          </div>
+
+          <footer style={styles.footer}>
+            S.E.A.N. v3.0 — Live sync powered by Firebase — Data from gc.nh.gov/dynamicdatadump
+          </footer>
+
+          {showInput && (
+            <DataInputModal
+              onClose={() => setShowInput(false)}
+              onProcess={processData}
+            />
+          )}
+        </div>
+      );
+    }
+
+    // ── Styles ───────────────────────────────────────────────
+    const styles = {
+      container: { fontFamily: "'IBM Plex Sans', sans-serif", background: "#0f1118", color: "#e2e8f0", minHeight: "100vh", position: "relative", overflow: "auto" },
+      bgPattern: { position: "fixed", top: 0, left: 0, right: 0, bottom: 0, backgroundImage: "radial-gradient(circle at 20% 50%, rgba(192,57,43,0.04) 0%, transparent 50%), radial-gradient(circle at 80% 20%, rgba(44,62,80,0.08) 0%, transparent 50%)", pointerEvents: "none", zIndex: 0 },
+      header: { position: "relative", zIndex: 1, padding: "28px 32px 20px", borderBottom: "1px solid rgba(255,255,255,0.06)", background: "linear-gradient(180deg, rgba(15,17,24,1) 0%, rgba(15,17,24,0.95) 100%)" },
+      titleRow: { display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: "20px", flexWrap: "wrap", gap: "16px" },
+      title: { fontFamily: "'IBM Plex Mono', monospace", fontSize: "32px", fontWeight: 700, letterSpacing: "3px", margin: 0, color: "#e2e8f0" },
+      accent: { color: "#c0392b" },
+      titleFull: { fontFamily: "'IBM Plex Mono', monospace", fontSize: "12px", color: "#718096", letterSpacing: "2px", textTransform: "uppercase", margin: "4px 0 0" },
+      subtitle: { fontFamily: "'IBM Plex Mono', monospace", fontSize: "10px", color: "#4a5568", letterSpacing: "1.5px", textTransform: "uppercase", margin: "4px 0 0" },
+      refreshBtn: { fontFamily: "'IBM Plex Mono', monospace", fontSize: "13px", fontWeight: 600, padding: "12px 24px", background: "rgba(192,57,43,0.15)", border: "1px solid rgba(192,57,43,0.3)", borderRadius: "6px", color: "#c0392b", cursor: "pointer", letterSpacing: "0.5px", whiteSpace: "nowrap" },
+      statsRow: { display: "flex", gap: "16px", flexWrap: "wrap", alignItems: "center" },
+      statBox: { background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.06)", borderRadius: "6px", padding: "10px 16px", minWidth: "120px" },
+      statNumber: { fontFamily: "'IBM Plex Mono', monospace", fontSize: "28px", fontWeight: 700, color: "#e2e8f0", lineHeight: 1 },
+      statLabel: { fontSize: "10px", color: "#718096", textTransform: "uppercase", letterSpacing: "1px", marginTop: "4px" },
+      statMeta: { fontSize: "11px", color: "#718096", fontFamily: "'IBM Plex Mono', monospace" },
+      toolbar: { position: "relative", zIndex: 1, display: "flex", gap: "12px", padding: "16px 32px", alignItems: "center" },
+      filterInput: { flex: 1, fontFamily: "'IBM Plex Mono', monospace", fontSize: "13px", padding: "10px 14px", background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.08)", borderRadius: "6px", color: "#e2e8f0", outline: "none" },
+      clearBtn: { fontFamily: "'IBM Plex Mono', monospace", fontSize: "11px", padding: "10px 16px", background: "rgba(192,57,43,0.15)", border: "1px solid rgba(192,57,43,0.3)", borderRadius: "6px", color: "#c0392b", cursor: "pointer", whiteSpace: "nowrap", textTransform: "uppercase", letterSpacing: "0.5px", fontWeight: 600 },
+      cardGrid: { position: "relative", zIndex: 1, display: "flex", flexDirection: "column", gap: "12px", padding: "4px 32px 32px" },
+      card: { background: "rgba(255,255,255,0.025)", border: "1px solid rgba(255,255,255,0.06)", borderRadius: "8px", padding: "16px 20px" },
+      cardHeader: { display: "flex", justifyContent: "space-between", alignItems: "center", cursor: "pointer", marginBottom: "8px" },
+      cardHeaderLeft: { display: "flex", alignItems: "center", gap: "10px" },
+      newBadge: { fontFamily: "'IBM Plex Mono', monospace", fontSize: "9px", fontWeight: 700, background: "#c0392b", color: "#fff", padding: "2px 8px", borderRadius: "3px", letterSpacing: "1.5px", animation: "pulse 2s ease-in-out infinite" },
+      billNumber: { fontFamily: "'IBM Plex Mono', monospace", fontSize: "18px", fontWeight: 700, color: "#e2e8f0", letterSpacing: "0.5px" },
+      dateChip: { fontFamily: "'IBM Plex Mono', monospace", fontSize: "11px", color: "#718096", background: "rgba(255,255,255,0.04)", padding: "3px 8px", borderRadius: "3px" },
+      expandIcon: { fontSize: "16px", color: "#4a5568" },
+      introDesc: { fontSize: "12px", color: "#a0aec0", margin: "0 0 10px", lineHeight: 1.5, fontStyle: "italic" },
+      latestAction: { display: "flex", alignItems: "flex-start", gap: "10px", marginBottom: "10px", padding: "8px 12px", background: "rgba(44,62,80,0.15)", borderRadius: "5px" },
+      senateTag: { fontFamily: "'IBM Plex Mono', monospace", fontSize: "9px", fontWeight: 700, background: "rgba(192,57,43,0.2)", color: "#e74c3c", padding: "3px 8px", borderRadius: "3px", letterSpacing: "1px", flexShrink: 0, marginTop: "1px" },
+      actionText: { fontSize: "12px", color: "#cbd5e0", lineHeight: 1.5, fontFamily: "'IBM Plex Mono', monospace" },
+      amendRow: { display: "flex", gap: "6px", flexWrap: "wrap", marginBottom: "10px" },
+      amendChip: { fontFamily: "'IBM Plex Mono', monospace", fontSize: "11px", color: "#a0aec0", background: "rgba(255,255,255,0.06)", padding: "3px 10px", borderRadius: "12px", border: "1px solid rgba(255,255,255,0.08)" },
+      summarizeBtn: { fontFamily: "'IBM Plex Mono', monospace", fontSize: "11px", padding: "8px 14px", background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: "5px", color: "#a0aec0", cursor: "pointer", display: "flex", alignItems: "center", gap: "6px" },
+      aiIcon: { color: "#c0392b", fontSize: "14px" },
+      summaryBox: { background: "rgba(192,57,43,0.06)", border: "1px solid rgba(192,57,43,0.15)", borderRadius: "6px", padding: "12px 14px", marginTop: "2px" },
+      summaryLabel: { fontFamily: "'IBM Plex Mono', monospace", fontSize: "9px", fontWeight: 700, color: "#c0392b", letterSpacing: "1.5px", marginBottom: "6px", display: "flex", alignItems: "center", gap: "4px" },
+      summaryText: { fontSize: "13px", color: "#cbd5e0", lineHeight: 1.6, margin: 0 },
+      expandedSection: { marginTop: "12px", paddingTop: "12px", borderTop: "1px solid rgba(255,255,255,0.06)" },
+      expandedTitle: { fontFamily: "'IBM Plex Mono', monospace", fontSize: "10px", fontWeight: 700, color: "#718096", letterSpacing: "1.5px", marginBottom: "8px" },
+      actionRow: { display: "flex", gap: "12px", padding: "6px 0", borderBottom: "1px solid rgba(255,255,255,0.03)", alignItems: "flex-start" },
+      actionDate: { fontFamily: "'IBM Plex Mono', monospace", fontSize: "11px", color: "#718096", flexShrink: 0, width: "85px" },
+      actionDesc: { fontSize: "12px", color: "#a0aec0", lineHeight: 1.4 },
+      gcLink: { fontFamily: "'IBM Plex Mono', monospace", fontSize: "11px", color: "#c0392b", textDecoration: "none" },
+      emptyState: { textAlign: "center", padding: "60px 20px", color: "#4a5568" },
+      emptyTitle: { fontFamily: "'IBM Plex Mono', monospace", fontSize: "18px", fontWeight: 600, color: "#718096", marginBottom: "8px" },
+      emptyDesc: { fontSize: "13px", color: "#4a5568", marginBottom: "20px" },
+      emptyBtn: { fontFamily: "'IBM Plex Mono', monospace", fontSize: "13px", padding: "12px 28px", background: "rgba(192,57,43,0.15)", border: "1px solid rgba(192,57,43,0.3)", borderRadius: "6px", color: "#c0392b", cursor: "pointer", fontWeight: 600 },
+      footer: { position: "relative", zIndex: 1, textAlign: "center", padding: "20px 32px", fontFamily: "'IBM Plex Mono', monospace", fontSize: "10px", color: "#2d3748", letterSpacing: "1px", borderTop: "1px solid rgba(255,255,255,0.03)" },
+      modalOverlay: { position: "fixed", top: 0, left: 0, right: 0, bottom: 0, background: "rgba(0,0,0,0.85)", zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center", padding: "20px" },
+      modal: { background: "#1a1d2e", border: "1px solid rgba(255,255,255,0.1)", borderRadius: "12px", width: "100%", maxWidth: "640px", maxHeight: "90vh", overflow: "auto" },
+      modalHeader: { display: "flex", justifyContent: "space-between", alignItems: "center", padding: "20px 24px", borderBottom: "1px solid rgba(255,255,255,0.06)" },
+      modalTitle: { fontFamily: "'IBM Plex Mono', monospace", fontSize: "16px", fontWeight: 700, color: "#e2e8f0", margin: 0, letterSpacing: "1px" },
+      modalClose: { background: "none", border: "none", color: "#4a5568", fontSize: "18px", cursor: "pointer", padding: "4px 8px" },
+      modalBody: { padding: "20px 24px" },
+      stepIndicator: { display: "flex", gap: "16px", marginBottom: "20px" },
+      stepActive: { fontFamily: "'IBM Plex Mono', monospace", fontSize: "12px", fontWeight: 700, color: "#c0392b", letterSpacing: "1px" },
+      stepInactive: { fontFamily: "'IBM Plex Mono', monospace", fontSize: "12px", color: "#4a5568", letterSpacing: "1px" },
+      stepDone: { fontFamily: "'IBM Plex Mono', monospace", fontSize: "12px", color: "#27ae60", letterSpacing: "1px" },
+      instructions: { marginBottom: "16px" },
+      instrText: { fontSize: "13px", color: "#a0aec0", margin: "6px 0", lineHeight: 1.5 },
+      instrLink: { color: "#c0392b", textDecoration: "none" },
+      code: { fontFamily: "'IBM Plex Mono', monospace", background: "rgba(192,57,43,0.1)", color: "#c0392b", padding: "2px 6px", borderRadius: "3px", fontSize: "12px" },
+      pasteBox: { width: "100%", height: "180px", fontFamily: "'IBM Plex Mono', monospace", fontSize: "11px", padding: "12px", background: "rgba(0,0,0,0.3)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: "6px", color: "#a0aec0", resize: "vertical", outline: "none" },
+      pasteCount: { fontFamily: "'IBM Plex Mono', monospace", fontSize: "11px", color: "#4a5568", margin: "8px 0 16px", letterSpacing: "0.5px" },
+      nextBtn: { fontFamily: "'IBM Plex Mono', monospace", fontSize: "13px", fontWeight: 600, padding: "12px 24px", background: "rgba(192,57,43,0.15)", border: "1px solid rgba(192,57,43,0.3)", borderRadius: "6px", color: "#c0392b", cursor: "pointer", width: "100%", letterSpacing: "0.5px" },
+      btnRow: { display: "flex", gap: "12px" },
+      backBtn: { fontFamily: "'IBM Plex Mono', monospace", fontSize: "12px", padding: "12px 20px", background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.08)", borderRadius: "6px", color: "#718096", cursor: "pointer" },
+      processBtn: { fontFamily: "'IBM Plex Mono', monospace", fontSize: "13px", fontWeight: 600, padding: "12px 24px", background: "rgba(192,57,43,0.2)", border: "1px solid rgba(192,57,43,0.4)", borderRadius: "6px", color: "#c0392b", cursor: "pointer", flex: 1, letterSpacing: "0.5px" },
+    };
+
+    // ── Mount ────────────────────────────────────────────────
+    ReactDOM.render(<SEAN />, document.getElementById("root"));
+  </script>
+</body>
+</html>
