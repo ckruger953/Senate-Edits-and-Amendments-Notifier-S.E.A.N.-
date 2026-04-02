@@ -21,15 +21,32 @@
     houseComm: 'All',
     senateComm: 'All',
     expanded: {},
+    analyses: {},
+    loading: {},
     toggle(bn) { this.expanded[bn] = !this.expanded[bn] },
     matches(bill) {
         if (this.search) {
             const q = this.search.toLowerCase();
-            if (!bill.bn.toLowerCase().includes(q) && !bill.title.toLowerCase().includes(q) && !bill.latestDesc.toLowerCase().includes(q) && !bill.analysis.toLowerCase().includes(q)) return false;
+            if (!bill.bn.toLowerCase().includes(q) && !bill.title.toLowerCase().includes(q) && !bill.latestDesc.toLowerCase().includes(q) && !bill.amendText.toLowerCase().includes(q)) return false;
         }
         if (this.houseComm !== 'All' && bill.hc !== this.houseComm) return false;
         if (this.senateComm !== 'All' && bill.sc !== this.senateComm) return false;
         return true;
+    },
+    async analyze(bn) {
+        if (this.analyses[bn] || this.loading[bn]) return;
+        this.loading[bn] = true;
+        try {
+            const resp = await fetch('/admin/senate-amendments/analyze/' + bn, {
+                method: 'POST',
+                headers: {'X-CSRFToken': '{{ csrf_token() }}'}
+            });
+            const data = await resp.json();
+            this.analyses[bn] = data.error ? 'Error: ' + data.error : data.analysis;
+        } catch(e) {
+            this.analyses[bn] = 'Failed to analyze: ' + e.message;
+        }
+        this.loading[bn] = false;
     }
 }">
     <!-- Stats -->
@@ -81,7 +98,7 @@
     <div class="space-y-3">
         {% for bill in bills %}
         <div class="bg-white rounded-xl shadow-sm border overflow-hidden"
-             x-show="matches({bn: '{{ bill.bill_number }}', title: {{ bill.title|tojson }}, latestDesc: {{ (bill.senate_actions[0].description if bill.senate_actions else '')|tojson }}, hc: '{{ bill.house_committee or '' }}', sc: '{{ bill.senate_committee or '' }}', analysis: {{ (bill.committee_analysis or '')|tojson }}})">
+             x-show="matches({bn: '{{ bill.bill_number }}', title: {{ bill.title|tojson }}, latestDesc: {{ (bill.senate_actions[0].description if bill.senate_actions else '')|tojson }}, hc: '{{ bill.house_committee or '' }}', sc: '{{ bill.senate_committee or '' }}', amendText: {{ (bill.amendment_text or '')|tojson }}})">
             <!-- Header -->
             <div class="p-5 cursor-pointer hover:bg-slate-50 transition" @click="toggle('{{ bill.bill_number }}')">
                 <div class="flex items-center justify-between">
@@ -127,32 +144,58 @@
                     <span class="text-xs text-slate-600 leading-relaxed">{{ bill.senate_actions[0].description }}</span>
                 </div>
                 {% endif %}
-                <!-- Committee analysis preview -->
-                {% if bill.committee_analysis %}
-                <div class="mt-2 text-sm text-slate-600 leading-relaxed line-clamp-2">
-                    {{ bill.committee_analysis }}
-                </div>
-                {% endif %}
             </div>
 
             <!-- Expanded Detail -->
             <div x-show="expanded['{{ bill.bill_number }}']" x-collapse>
-                <div class="border-t px-5 py-4 bg-slate-50/50">
-                    {% if bill.committee_analysis %}
-                    <div class="mb-4">
-                        <div class="text-xs font-bold text-slate-400 uppercase tracking-wider mb-2">Committee Analysis</div>
-                        <div class="bg-white rounded-lg border p-4 text-sm text-slate-700 leading-relaxed">
-                            {{ bill.committee_analysis }}
+                <div class="border-t px-5 py-4 bg-slate-50/50 space-y-4">
+
+                    <!-- Amendment Text -->
+                    {% if bill.amendment_text %}
+                    <div>
+                        <div class="text-xs font-bold text-slate-400 uppercase tracking-wider mb-2">
+                            Amendment Text
+                            {% if bill.amendment_version %}
+                            <span class="text-amber-600 normal-case">({{ bill.amendment_version }})</span>
+                            {% endif %}
+                        </div>
+                        <div class="bg-white rounded-lg border p-4 text-sm text-slate-700 leading-relaxed max-h-64 overflow-y-auto font-mono text-xs">
+                            {{ bill.amendment_text }}
                         </div>
                     </div>
                     {% endif %}
-                    <div class="text-xs font-bold text-slate-400 uppercase tracking-wider mb-3">All Senate Actions</div>
-                    {% for action in bill.senate_actions %}
-                    <div class="flex gap-3 py-2 {% if not loop.last %}border-b border-slate-100{% endif %}">
-                        <span class="text-xs text-slate-500 shrink-0 w-20 pt-0.5">{{ action.date }}</span>
-                        <span class="text-sm text-slate-700">{{ action.description }}</span>
+
+                    <!-- AI Analysis -->
+                    <div>
+                        <div class="flex items-center gap-3 mb-2">
+                            <div class="text-xs font-bold text-slate-400 uppercase tracking-wider">Independent Analysis</div>
+                            <template x-if="!analyses['{{ bill.bill_number }}'] && !loading['{{ bill.bill_number }}']">
+                                <button @click.stop="analyze('{{ bill.bill_number }}')"
+                                        class="text-xs px-3 py-1 bg-crossover text-white rounded-lg hover:bg-red-800 font-medium transition">
+                                    Analyze with AI
+                                </button>
+                            </template>
+                            <template x-if="loading['{{ bill.bill_number }}']">
+                                <span class="text-xs text-slate-400 animate-pulse">Analyzing...</span>
+                            </template>
+                        </div>
+                        <template x-if="analyses['{{ bill.bill_number }}']">
+                            <div class="bg-white rounded-lg border border-amber-200 p-4 text-sm text-slate-700 leading-relaxed prose prose-sm max-w-none"
+                                 x-html="analyses['{{ bill.bill_number }}'].replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>').replace(/\n/g, '<br>')">
+                            </div>
+                        </template>
                     </div>
-                    {% endfor %}
+
+                    <!-- All Senate Actions -->
+                    <div>
+                        <div class="text-xs font-bold text-slate-400 uppercase tracking-wider mb-3">All Senate Actions</div>
+                        {% for action in bill.senate_actions %}
+                        <div class="flex gap-3 py-2 {% if not loop.last %}border-b border-slate-100{% endif %}">
+                            <span class="text-xs text-slate-500 shrink-0 w-20 pt-0.5">{{ action.date }}</span>
+                            <span class="text-sm text-slate-700">{{ action.description }}</span>
+                        </div>
+                        {% endfor %}
+                    </div>
                 </div>
             </div>
         </div>
